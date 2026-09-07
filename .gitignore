@@ -1,0 +1,13 @@
+/node_modules
+
+# Local MongoDB storage, journals and active lock files
+/data/
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+
+# Runtime logs and test output
+*.log
+/test-results/
