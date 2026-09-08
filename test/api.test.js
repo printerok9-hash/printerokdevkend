@@ -7,6 +7,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 process.env.CALENDLY_WEBHOOK_SIGNING_KEY = "isolated-test-signing-key";
 process.env.FORMSUBMIT_EMAIL = "";
 process.env.NODE_ENV = "test";
+process.env.SITE_ORIGIN = "http://localhost:3000";
 const { app, models, mongoose } = require("../index");
 let mongo, agent;
 const origin = "http://localhost:3000";
@@ -41,6 +42,96 @@ test("unauthenticated admin requests are rejected", async () => {
     .set("Origin", origin)
     .send({})
     .expect(401);
+});
+
+test("all collection management routes require admin login", async () => {
+  const id = new mongoose.Types.ObjectId().toString();
+  for (const collection of [
+    "appointments",
+    "enquiries",
+    "posts",
+    "services",
+    "faqs",
+    "reviews",
+  ]) {
+    for (const [method, suffix] of [
+      ["get", ""],
+      ["get", "/" + id],
+      ["post", ""],
+      ["patch", "/" + id],
+      ["put", "/" + id],
+      ["delete", "/" + id],
+    ]) {
+      await request(app)
+        [method]("/api/admin/" + collection + suffix)
+        .set("Origin", origin)
+        .expect(401);
+    }
+  }
+  await request(app)
+    .post("/api/admin/appointments/" + id + "/retry-email")
+    .set("Origin", origin)
+    .expect(401);
+  const token = "orphaned-session-test";
+  const session = await models.Session.create({
+    hash: crypto.createHash("sha256").update(token).digest("hex"),
+    adminId: new mongoose.Types.ObjectId(),
+    expires: new Date(Date.now() + 60000),
+  });
+  try {
+    await request(app)
+      .get("/api/admin/appointments")
+      .set("Cookie", "pinterok_session=" + token)
+      .expect(401);
+  } finally {
+    await models.Session.deleteOne({ _id: session._id });
+  }
+});
+
+test("public content lists only published records and do not allow writes", async () => {
+  for (const kind of ["posts", "services", "faqs", "reviews"]) {
+    const rows = await models.Content.create([
+      {
+        kind,
+        title: "Public access fixture",
+        slug: "access-public",
+        published: true,
+      },
+      {
+        kind,
+        title: "Private access fixture",
+        slug: "access-draft",
+        published: false,
+      },
+    ]);
+    try {
+      const result = await request(app)
+        .get("/api/public/" + kind)
+        .expect(200);
+      assert.ok(result.body.some((item) => item._id === rows[0].id));
+      assert.ok(!result.body.some((item) => item._id === rows[1].id));
+      await request(app)
+        .post("/api/public/" + kind)
+        .set("Origin", origin)
+        .send({ title: "Unauthorized" })
+        .expect(404);
+      await request(app)
+        .patch("/api/public/" + kind + "/" + rows[0].id)
+        .set("Origin", origin)
+        .send({ published: false })
+        .expect(404);
+      await request(app)
+        .delete("/api/public/" + kind + "/" + rows[0].id)
+        .set("Origin", origin)
+        .expect(404);
+    } finally {
+      await models.Content.deleteMany({
+        _id: { $in: rows.map((item) => item._id) },
+      });
+    }
+  }
+  await request(app).get("/api/public/appointments").expect(404);
+  await request(app).get("/api/appointments").expect(404);
 });
 
 test("Vercel entrypoint exports a callable Express app and serves root and health", async () => {

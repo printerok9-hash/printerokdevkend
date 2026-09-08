@@ -161,7 +161,7 @@ async function auth(req, res, next) {
     hash: crypto.createHash("sha256").update(token).digest("hex"),
     expires: { $gt: new Date() },
   });
-  if (!session)
+  if (!session || !(await Admin.exists({ _id: session.adminId })))
     return res.status(401).json({ error: "Session expired. Please sign in." });
   req.session = session;
   next();
@@ -299,6 +299,7 @@ app.use(
     legacyHeaders: false,
   }),
 );
+// Public content is read-only and excludes drafts. All management routes live below /api/admin.
 app.get("/api/public/:kind", connected, async (req, res) => {
   if (!["posts", "services", "faqs", "reviews"].includes(req.params.kind))
     return res.sendStatus(404);
@@ -403,6 +404,7 @@ app.post(
     res.json({ ok: true });
   },
 );
+// Login is the only public admin endpoint; every subsequent admin operation requires a valid session.
 app.use("/api/admin", connected, auth, (req, res, next) => {
   res.set("Cache-Control", "no-store");
   if (!["GET", "HEAD"].includes(req.method)) return sameOrigin(req, res, next);
