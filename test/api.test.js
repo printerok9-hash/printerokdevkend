@@ -5,8 +5,8 @@ const bcrypt = require("bcryptjs");
 const crypto = require("node:crypto");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 process.env.CALENDLY_WEBHOOK_SIGNING_KEY = "isolated-test-signing-key";
-process.env.SMTP_HOST = '';
-process.env.NODE_ENV = 'test';
+process.env.FORMSUBMIT_EMAIL = "";
+process.env.NODE_ENV = "test";
 const { app, models, mongoose } = require("../index");
 let mongo, agent;
 const origin = "http://localhost:3000";
@@ -202,6 +202,207 @@ test("Calendly signatures are verified and repeated events are idempotent", asyn
     1,
   );
 });
+test("Calendly sync preserves answers, time and cancellation across duplicate deliveries", async () => {
+  const data = {
+    uri: "https://api.calendly.com/scheduled_events/sync/invitees/sync",
+    name: "Sync Customer",
+    email: "sync@example.com",
+    timezone: "Asia/Kolkata",
+    scheduled_event: { start_time: "2099-01-01T10:00:00Z" },
+    questions_and_answers: [
+      { question: "Phone number", answer: "+447700900123" },
+      { question: "Postcode", answer: "SW1A 1AA" },
+      { question: "Printer brand", answer: "Epson" },
+      { question: "Printer problem", answer: "Paper keeps jamming" },
+    ],
+  };
+  async function deliver(
+    event,
+    timestamp = String(Math.floor(Date.now() / 1000)),
+    expected = 200,
+  ) {
+    const body = JSON.stringify({ event, payload: data });
+    const signature = crypto
+      .createHmac("sha256", process.env.CALENDLY_WEBHOOK_SIGNING_KEY)
+      .update(timestamp + "." + body)
+      .digest("hex");
+    await request(app)
+      .post("/api/webhooks/calendly")
+      .set("Content-Type", "application/json")
+      .set("Calendly-Webhook-Signature", "t=" + timestamp + ",v1=" + signature)
+      .send(body)
+      .expect(expected);
+  }
+  await deliver("invitee.created", "NaN", 401);
+  await deliver("invitee.created");
+  let saved = await models.Lead.findOne({ externalId: data.uri });
+  assert.equal(saved.postcode, "SW1A 1AA");
+  assert.equal(saved.brand, "Epson");
+  assert.equal(saved.calendlyStartTime, data.scheduled_event.start_time);
+  assert.equal(saved.preferredDate, "2099-01-01");
+  assert.match(saved.problem, /Paper keeps jamming/);
+  await deliver("invitee.canceled");
+  await deliver("invitee.created");
+  saved = await models.Lead.findOne({ externalId: data.uri });
+  assert.equal(saved.status, "cancelled");
+  assert.equal(await models.Lead.countDocuments({ externalId: data.uri }), 1);
+  await models.Lead.deleteOne({ externalId: data.uri });
+  await deliver("invitee.canceled");
+  await deliver("invitee.created");
+  saved = await models.Lead.findOne({ externalId: data.uri });
+  assert.equal(saved.status, "cancelled");
+  await models.Lead.deleteOne({ externalId: data.uri });
+});
+
+test("admin search covers the full dataset, filters before paging and clamps empty pages", async () => {
+  const rows = Array.from({ length: 511 }, (_, i) => ({
+    type: "appointments",
+    name: `Pagination fixture ${i}`,
+    email: "pagination@example.com",
+    phone: "+447700900123",
+    postcode: "SW1A 1AA",
+    brand: i === 0 ? "Rare brand" : "Canon",
+    problem: i === 0 ? "Unique [scanner] issue" : "Paper feed issue",
+    status: i % 2 ? "completed" : "pending",
+    notification: "sent",
+    createdAt: new Date(2020, 0, 1, 0, 0, i),
+  }));
+  await models.Lead.insertMany(rows);
+  try {
+    const first = (
+      await agent
+        .get("/api/admin/appointments")
+        .query({ page: 1, q: "pagination@example.com" })
+        .expect(200)
+    ).body;
+    assert.equal(first.items.length, 10);
+    assert.equal(first.total, 511);
+    assert.equal(first.pages, 52);
+    const second = (
+      await agent
+        .get("/api/admin/appointments")
+        .query({ page: 2, q: "pagination@example.com" })
+        .expect(200)
+    ).body;
+    assert.ok(
+      second.items.every(
+        (item) => !first.items.some((other) => other._id === item._id),
+      ),
+    );
+    const found = (
+      await agent
+        .get("/api/admin/appointments")
+        .query({
+          page: 1,
+          q: "UNIQUE [scanner] SW1A",
+          brand: "Rare brand",
+          status: "pending",
+          notification: "sent",
+        })
+        .expect(200)
+    ).body;
+    assert.equal(found.total, 1);
+    assert.equal(found.items[0].name, "Pagination fixture 0");
+    const clamped = (
+      await agent
+        .get("/api/admin/appointments")
+        .query({ page: 999, q: "pagination@example.com" })
+        .expect(200)
+    ).body;
+    assert.equal(clamped.page, 52);
+    assert.equal(clamped.items.length, 1);
+    const empty = (
+      await agent
+        .get("/api/admin/appointments")
+        .query({ page: 20, q: "does-not-exist-unique" })
+        .expect(200)
+    ).body;
+    assert.equal(empty.total, 0);
+    assert.equal(empty.page, 1);
+    await agent.get("/api/admin/appointments").query({ page: -1 }).expect(400);
+    await agent
+      .get("/api/admin/appointments")
+      .query({ page: 1, status: "invalid" })
+      .expect(400);
+    const content = await models.Content.create({
+      kind: "posts",
+      title: "Pagination draft fixture",
+      published: false,
+    });
+    try {
+      const drafts = (
+        await agent
+          .get("/api/admin/posts")
+          .query({ page: 1, q: "Pagination draft", published: "false" })
+          .expect(200)
+      ).body;
+      assert.equal(drafts.total, 1);
+      const published = (
+        await agent
+          .get("/api/admin/posts")
+          .query({ page: 1, q: "Pagination draft", published: "true" })
+          .expect(200)
+      ).body;
+      assert.equal(published.total, 0);
+    } finally {
+      await models.Content.deleteOne({ _id: content._id });
+    }
+  } finally {
+    await models.Lead.deleteMany({ email: "pagination@example.com" });
+  }
+});
+
+test("admin can edit customer requests with validation and collection isolation", async () => {
+  const record = await models.Lead.create({ ...lead, type: "enquiries" });
+  try {
+    await agent
+      .patch(`/api/admin/enquiries/${record._id}`)
+      .set("Origin", origin)
+      .send({
+        name: "Updated Customer",
+        phone: "+447700900456",
+        email: "updated@example.com",
+        postcode: "SW1A 1AA",
+        brand: "Epson",
+        problem: "Paper keeps jamming in the feeder",
+        preferredDate: "2020-01-01",
+        status: "confirmed",
+        type: "appointments",
+        notification: "sent",
+      })
+      .expect(200);
+    const saved = await models.Lead.findById(record._id);
+    assert.equal(saved.name, "Updated Customer");
+    assert.equal(saved.postcode, "SW1A 1AA");
+    assert.equal(saved.brand, "Epson");
+    assert.equal(saved.status, "confirmed");
+    assert.equal(saved.type, "enquiries");
+    assert.equal(saved.notification, "pending");
+    await agent
+      .patch(`/api/admin/enquiries/${record._id}`)
+      .set("Origin", origin)
+      .send({ status: "pending", email: "invalid" })
+      .expect(400);
+    await agent
+      .patch(`/api/admin/enquiries/${record._id}`)
+      .set("Origin", origin)
+      .send({ status: "pending", preferredDate: "2026-02-31" })
+      .expect(400);
+    await agent
+      .patch(`/api/admin/appointments/${record._id}`)
+      .set("Origin", origin)
+      .send({ status: "pending" })
+      .expect(404);
+    await agent
+      .patch(`/api/admin/enquiries/${record._id}`)
+      .set("Origin", origin)
+      .send({ status: "completed", postcode: "", preferredDate: "" })
+      .expect(200);
+  } finally {
+    await models.Lead.deleteOne({ _id: record._id });
+  }
+});
+
 test("logout revokes database session", async () => {
   await agent.post("/api/admin/logout").set("Origin", origin).expect(200);
   await agent.get("/api/admin/stats").expect(401);

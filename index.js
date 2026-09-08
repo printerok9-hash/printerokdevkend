@@ -6,7 +6,7 @@ const { rateLimit } = require("express-rate-limit");
 const cookieParser = require("cookie-parser");
 const bcrypt = require("bcryptjs");
 const crypto = require("node:crypto");
-const nodemailer = require("nodemailer");
+const { sendNotification } = require("./formsubmit");
 const multer = require("multer");
 const { z } = require("zod");
 const app = express();
@@ -32,6 +32,8 @@ const Lead = mongoose.model(
       postcode: String,
       problem: String,
       preferredDate: String,
+      calendlyStartTime: String,
+      calendlyTimezone: String,
       status: {
         type: String,
         enum: ["pending", "confirmed", "in-progress", "completed", "cancelled"],
@@ -152,31 +154,16 @@ async function auth(req, res, next) {
   req.session = session;
   next();
 }
-const emailTransport = process.env.SMTP_HOST
-  ? nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: process.env.SMTP_SECURE === "true",
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      connectionTimeout: 10000,
-      socketTimeout: 10000,
-    })
-  : null;
+const notificationEmail = process.env.FORMSUBMIT_EMAIL || "";
 async function notifyLead(lead) {
-  if (!emailTransport) {
+  if (!notificationEmail) {
     lead.notification = "not-configured";
     await lead.save();
     return;
   }
   try {
-    await emailTransport.sendMail({
-      from: process.env.SMTP_FROM,
-      to: "printerok9@gmail.com",
-      replyTo: lead.email,
-      subject: `Pinterok: new ${lead.type === "appointments" ? "appointment request" : "enquiry"}`,
-      text: `Name: ${lead.name}\nPhone: ${lead.phone}\nEmail: ${lead.email}\nBrand: ${lead.brand}\nPostcode: ${lead.postcode || "Not supplied"}\nPreferred date: ${lead.preferredDate || "Not specified"}\n\n${lead.problem}\n\nView in your Pinterok admin dashboard.`,
-    });
-    lead.notification = "sent";
+    await sendNotification(lead, notificationEmail, origin);
+    lead.notification = "submitted";
   } catch {
     lead.notification = "failed";
     console.error(
@@ -197,7 +184,11 @@ app.post(
     const entries = sig.split(",").map((v) => v.trim().split("="));
     const timestamp = entries.find((v) => v[0] === "t")?.[1];
     const signatures = entries.filter((v) => v[0] === "v1").map((v) => v[1]);
-    if (!timestamp || Math.abs(Date.now() / 1000 - Number(timestamp)) > 180)
+    if (
+      !timestamp ||
+      !/^\d+$/.test(timestamp) ||
+      Math.abs(Date.now() / 1000 - Number(timestamp)) > 180
+    )
       return res.sendStatus(401);
     const expected = crypto
       .createHmac("sha256", secret)
@@ -222,32 +213,56 @@ app.post(
     }
     const p = event.payload;
     if (!p?.uri || !p?.email || !p?.name) return res.sendStatus(400);
-    if (event.event === "invitee.canceled") {
-      await Lead.updateOne(
-        { externalId: p.uri },
-        { $set: { status: "cancelled" } },
-      );
+    if (!["invitee.created", "invitee.canceled"].includes(event.event))
       return res.sendStatus(200);
-    }
-    if (event.event !== "invitee.created") return res.sendStatus(200);
+    const answers = Array.isArray(p.questions_and_answers)
+      ? p.questions_and_answers
+      : [];
+    const answer = (pattern) =>
+      String(
+        answers.find((item) => pattern.test(String(item.question)))?.answer ||
+          "",
+      );
+    const details = answers
+      .map((item) => `${item.question}: ${item.answer}`)
+      .join("\n");
+    const startTime = String(p.scheduled_event?.start_time || "");
+    const cancelled = event.event === "invitee.canceled";
     try {
-      const lead = await Lead.create({
+      const fields = {
         type: "appointments",
         name: String(p.name).slice(0, 100),
         email: String(p.email).slice(0, 254),
-        phone: String(p.text_reminder_number || "Not supplied").slice(0, 25),
-        brand: "Via Calendly",
-        postcode: "Not supplied",
-        problem:
-          "Appointment booked via Calendly. Check Calendly for event details.",
-        preferredDate: String(p.scheduled_event?.start_time || ""),
-        status: "confirmed",
+        phone: String(
+          p.text_reminder_number ||
+            answer(/phone|mobile|contact number/i) ||
+            "Not supplied",
+        ).slice(0, 25),
+        brand: (answer(/brand/i) || "Via Calendly").slice(0, 80),
+        postcode: (answer(/post\s*code|postal|zip/i) || "Not supplied").slice(
+          0,
+          12,
+        ),
+        problem: (
+          details ||
+          "Appointment booked via Calendly. Check Calendly for event details."
+        ).slice(0, 3000),
+        preferredDate: startTime.slice(0, 10),
+        calendlyStartTime: startTime,
+        calendlyTimezone: String(p.timezone || "UTC"),
+        status: cancelled ? "cancelled" : "confirmed",
         externalId: p.uri,
-      });
-      res.sendStatus(200);
-      void notifyLead(lead).catch(() =>
-        console.error("Notification status could not be saved."),
+        notification: "managed-by-calendly",
+      };
+      const { status, ...insertFields } = fields;
+      await Lead.updateOne(
+        { externalId: p.uri },
+        cancelled
+          ? { $setOnInsert: insertFields, $set: { status } }
+          : { $setOnInsert: fields },
+        { upsert: true, runValidators: true },
       );
+      res.sendStatus(200);
     } catch (e) {
       if (e.code === 11000) return res.sendStatus(200);
       throw e;
@@ -260,7 +275,7 @@ app.get("/api/health", (req, res) =>
   res.status(mongoose.connection.readyState === 1 ? 200 : 503).json({
     database:
       mongoose.connection.readyState === 1 ? "connected" : "unavailable",
-    emailConfigured: !!emailTransport,
+    emailConfigured: !!notificationEmail,
   }),
 );
 app.use(
@@ -450,6 +465,88 @@ app.param("collection", (req, res, next, value) => {
 });
 app.get("/api/admin/:collection", async (req, res) => {
   const Model = req.isLead ? Lead : Content;
+  if (req.query.page !== undefined) {
+    const input = z
+      .object({
+        page: z.coerce.number().int().min(1).max(1000000),
+        q: z.string().trim().max(200).default(""),
+        status: z
+          .enum([
+            "",
+            "pending",
+            "confirmed",
+            "in-progress",
+            "completed",
+            "cancelled",
+          ])
+          .default(""),
+        notification: z.string().max(40).default(""),
+        brand: z.string().max(80).default(""),
+        published: z.enum(["", "true", "false"]).default(""),
+        sort: z.enum(["newest", "oldest"]).default("newest"),
+      })
+      .parse(req.query);
+    const base = req.isLead
+      ? { type: req.params.collection }
+      : { kind: req.params.collection };
+    const filter = { ...base };
+    if (req.isLead) {
+      if (input.status) filter.status = input.status;
+      if (input.notification) filter.notification = input.notification;
+      if (input.brand) filter.brand = input.brand;
+    } else if (input.published) filter.published = input.published === "true";
+    const fields = req.isLead
+      ? [
+          "name",
+          "email",
+          "phone",
+          "postcode",
+          "brand",
+          "problem",
+          "preferredDate",
+          "status",
+          "notification",
+        ]
+      : [
+          "title",
+          "slug",
+          "description",
+          "content",
+          "category",
+          "label",
+          "location",
+        ];
+    if (input.q)
+      filter.$and = input.q.split(/\s+/).map((term) => ({
+        $or: fields.map((field) => ({
+          [field]: {
+            $regex: term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+            $options: "i",
+          },
+        })),
+      }));
+    const [total, brands, notifications] = await Promise.all([
+      Model.countDocuments(filter),
+      req.isLead ? Model.distinct("brand", base) : [],
+      req.isLead ? Model.distinct("notification", base) : [],
+    ]);
+    const pages = Math.max(1, Math.ceil(total / 10));
+    const page = Math.min(input.page, pages);
+    const direction = input.sort === "oldest" ? 1 : -1;
+    const items = await Model.find(filter)
+      .sort({ createdAt: direction, _id: direction })
+      .skip((page - 1) * 10)
+      .limit(10)
+      .lean();
+    return res.json({
+      items,
+      total,
+      page,
+      pages,
+      brands: brands.filter(Boolean).sort(),
+      notifications: notifications.filter(Boolean).sort(),
+    });
+  }
   res.json(
     await Model.find(
       req.isLead
@@ -473,6 +570,26 @@ app.patch("/api/admin/:collection/:id", validId, async (req, res) => {
   const data = req.isLead
     ? z
         .object({
+          name: leadSchema.shape.name.optional(),
+          email: leadSchema.shape.email.optional(),
+          phone: leadSchema.shape.phone.optional(),
+          brand: leadSchema.shape.brand.optional(),
+          postcode: z
+            .union([z.literal(""), leadSchema.shape.postcode])
+            .optional(),
+          problem: leadSchema.shape.problem.optional(),
+          preferredDate: z
+            .string()
+            .refine((value) => {
+              if (!value) return true;
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+              const date = new Date(`${value}T12:00:00Z`);
+              return (
+                !Number.isNaN(date.getTime()) &&
+                date.toISOString().slice(0, 10) === value
+              );
+            }, "Please select a valid date.")
+            .optional(),
           status: z.enum([
             "pending",
             "confirmed",
@@ -501,8 +618,10 @@ app.post(
   validId,
   async (req, res) => {
     if (!req.isLead) return res.sendStatus(404);
-    if (!emailTransport)
-      return res.status(503).json({ error: "SMTP is not configured." });
+    if (!notificationEmail)
+      return res
+        .status(503)
+        .json({ error: "FormSubmit email is not configured." });
     const lead = await Lead.findOne({
       _id: req.params.id,
       type: req.params.collection,
