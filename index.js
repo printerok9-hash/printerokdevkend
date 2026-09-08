@@ -10,10 +10,22 @@ const { sendNotification } = require("./formsubmit");
 const multer = require("multer");
 const { z } = require("zod");
 const app = express();
+let databaseInitialization = null;
 app.disable("x-powered-by");
 if (process.env.TRUST_PROXY)
   app.set("trust proxy", Number(process.env.TRUST_PROXY));
 app.use(helmet());
+app.get("/", (req, res) =>
+  res.json({ service: "Pinterok API", health: "/api/health" }),
+);
+app.use(async (req, res, next) => {
+  try {
+    await initializeDatabase();
+  } catch {
+    /* Database routes return a controlled 503 below. */
+  }
+  next();
+});
 const production = process.env.NODE_ENV === "production";
 const origin = process.env.SITE_ORIGIN || "http://localhost:3000";
 const Lead = mongoose.model(
@@ -660,7 +672,16 @@ app.use((err, req, res, next) => {
     .status(err.status === 400 ? 400 : 500)
     .json({ error: "Unable to process this request. Please try again." });
 });
-async function start() {
+async function initializeDatabase() {
+  if (databaseInitialization) return databaseInitialization;
+  if (mongoose.connection.readyState === 1 || !process.env.MONGODB_URI) return;
+  databaseInitialization = connectDatabase().catch((error) => {
+    databaseInitialization = null;
+    throw error;
+  });
+  return databaseInitialization;
+}
+async function connectDatabase() {
   if (process.env.MONGODB_URI) {
     try {
       await mongoose.connect(process.env.MONGODB_URI, {
@@ -692,12 +713,16 @@ async function start() {
           });
       }
     } catch (e) {
-      console.error("Database startup failed:", e.message);
+      console.error("Database startup failed:", e.name);
+      throw e;
     }
   } else
     console.log(
       "MONGODB_URI is not configured. Public website works; persistence requires MongoDB.",
     );
+}
+async function start() {
+  await initializeDatabase().catch(() => {});
   return app.listen(
     Number(process.env.PORT || 4000),
     process.env.HOST || "127.0.0.1",
@@ -705,10 +730,11 @@ async function start() {
       console.log(`Pinterok API listening on port ${process.env.PORT || 4000}`),
   );
 }
-if (require.main === module) start();
-module.exports = {
+if (require.main === module && !process.env.VERCEL) start();
+module.exports = app;
+Object.assign(module.exports, {
   app,
   start,
   models: { Lead, Content, Admin, Session, Asset },
   mongoose,
-};
+});

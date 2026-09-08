@@ -42,6 +42,16 @@ test("unauthenticated admin requests are rejected", async () => {
     .send({})
     .expect(401);
 });
+
+test("Vercel entrypoint exports a callable Express app and serves root and health", async () => {
+  const entry = require("../index");
+  assert.equal(typeof entry, "function");
+  assert.equal(entry, entry.app);
+  const root = await request(entry).get("/").expect(200);
+  assert.equal(root.body.service, "Pinterok API");
+  const health = await request(entry).get("/api/health").expect(200);
+  assert.equal(health.body.database, "connected");
+});
 test("lead validation rejects spam, missing consent, impossible dates and cross-origin requests", async () => {
   await request(app)
     .post("/api/enquiries")
