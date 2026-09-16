@@ -9,16 +9,23 @@ async function sendNotification(lead, recipient, origin, fetcher = fetch) {
       },
       signal: AbortSignal.timeout(15000),
       body: JSON.stringify({
-        _subject: `Pinterok: new ${lead.type === "appointments" ? "appointment request" : "enquiry"}`,
+        _subject: `Pinterok: new ${
+          lead.type === "appointments"
+            ? "appointment request"
+            : lead.type === "chatbot"
+              ? "chatbot enquiry"
+              : "enquiry"
+        }`,
         _template: "table",
         _captcha: "false",
         _url: origin,
-        _replyto: lead.email,
+        _replyto: lead.email || undefined,
         name: lead.name,
-        email: lead.email,
+        email: lead.email || "Not supplied",
         phone: lead.phone,
-        brand: lead.brand,
+        brand: lead.brand || "Not supplied",
         postcode: lead.postcode || "Not supplied",
+        ...(lead.address ? { address: lead.address } : {}),
         preferredDate: lead.preferredDate || "Not specified",
         message: lead.problem,
         requestId: String(lead._id),

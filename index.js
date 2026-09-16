@@ -34,7 +34,7 @@ const Lead = mongoose.model(
     {
       type: {
         type: String,
-        enum: ["appointments", "enquiries"],
+        enum: ["appointments", "enquiries", "chatbot"],
         required: true,
       },
       name: String,
@@ -42,6 +42,7 @@ const Lead = mongoose.model(
       email: String,
       brand: String,
       postcode: String,
+      address: String,
       problem: String,
       preferredDate: String,
       calendlyStartTime: String,
@@ -117,6 +118,13 @@ const leadSchema = z.object({
     .optional(),
   consent: z.literal("true"),
   website: z.string().max(0).optional(),
+});
+const chatbotSchema = z.object({
+  name: leadSchema.shape.name,
+  phone: leadSchema.shape.phone,
+  address: z.string().trim().min(4).max(200),
+  problem: leadSchema.shape.problem,
+  website: leadSchema.shape.website,
 });
 const contentSchema = z.object({
   title: z.string().trim().min(2).max(200),
@@ -355,6 +363,23 @@ app.post(
     );
   },
 );
+app.post(
+  "/api/chatbot",
+  sameOrigin,
+  leadLimit,
+  connected,
+  async (req, res) => {
+    const { website, ...data } = chatbotSchema.parse(req.body);
+    const lead = await Lead.create({ ...data, type: "chatbot" });
+    res.status(201).json({
+      message:
+        "Thanks! We've received your details and will contact you shortly. For urgent help, call +44 7441448082 or message us on WhatsApp.",
+    });
+    void notifyLead(lead).catch(() =>
+      console.error("Notification status could not be saved."),
+    );
+  },
+);
 app.get("/api/images/:id", connected, validId, async (req, res) => {
   const asset = await Asset.findById(req.params.id);
   if (!asset) return res.sendStatus(404);
@@ -423,8 +448,8 @@ app.post("/api/admin/logout", async (req, res) => {
     .json({ ok: true });
 });
 app.get("/api/admin/stats", async (req, res) => {
-  const [appointments, pending, completed, posts, messages] = await Promise.all(
-    [
+  const [appointments, pending, completed, posts, messages, chats] =
+    await Promise.all([
       Lead.countDocuments({ type: "appointments" }),
       Lead.countDocuments({
         type: "appointments",
@@ -433,9 +458,9 @@ app.get("/api/admin/stats", async (req, res) => {
       Lead.countDocuments({ type: "appointments", status: "completed" }),
       Content.countDocuments({ kind: "posts" }),
       Lead.countDocuments({ type: "enquiries" }),
-    ],
-  );
-  res.json({ appointments, pending, completed, posts, messages });
+      Lead.countDocuments({ type: "chatbot" }),
+    ]);
+  res.json({ appointments, pending, completed, posts, messages, chats });
 });
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -467,6 +492,7 @@ app.param("collection", (req, res, next, value) => {
     ![
       "appointments",
       "enquiries",
+      "chatbot",
       "posts",
       "services",
       "faqs",
@@ -474,7 +500,7 @@ app.param("collection", (req, res, next, value) => {
     ].includes(value)
   )
     return res.sendStatus(404);
-  req.isLead = ["appointments", "enquiries"].includes(value);
+  req.isLead = ["appointments", "enquiries", "chatbot"].includes(value);
   next();
 });
 app.get("/api/admin/:collection", async (req, res) => {
@@ -515,6 +541,7 @@ app.get("/api/admin/:collection", async (req, res) => {
           "email",
           "phone",
           "postcode",
+          "address",
           "brand",
           "problem",
           "preferredDate",
@@ -590,6 +617,9 @@ app.patch("/api/admin/:collection/:id", validId, async (req, res) => {
           brand: leadSchema.shape.brand.optional(),
           postcode: z
             .union([z.literal(""), leadSchema.shape.postcode])
+            .optional(),
+          address: z
+            .union([z.literal(""), chatbotSchema.shape.address])
             .optional(),
           problem: leadSchema.shape.problem.optional(),
           preferredDate: z

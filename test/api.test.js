@@ -49,6 +49,7 @@ test("all collection management routes require admin login", async () => {
   for (const collection of [
     "appointments",
     "enquiries",
+    "chatbot",
     "posts",
     "services",
     "faqs",
@@ -180,6 +181,51 @@ test("enquiries persist before notifications and do not claim confirmed appointm
   assert.equal(stored.status, "pending");
   assert.equal(stored.problem, lead.problem);
   assert.equal(stored.postcode, undefined);
+});
+test("chatbot leads are created without email or printer brand and appear under admin", async () => {
+  await request(app)
+    .post("/api/chatbot")
+    .set("Origin", "https://untrusted.example")
+    .send({
+      name: "Chat Customer",
+      phone: "+447700900123",
+      address: "10 Downing Street, London",
+      problem: "Printer keeps showing a paper jam error",
+    })
+    .expect(403);
+  await request(app)
+    .post("/api/chatbot")
+    .set("Origin", origin)
+    .send({
+      name: "Chat Customer",
+      phone: "+447700900123",
+      address: "1a",
+      problem: "Printer keeps showing a paper jam error",
+    })
+    .expect(400);
+  const r = await request(app)
+    .post("/api/chatbot")
+    .set("Origin", origin)
+    .send({
+      name: "Chat Customer",
+      phone: "+447700900123",
+      address: "10 Downing Street, London",
+      problem: "Printer keeps showing a paper jam error",
+      website: "",
+    })
+    .expect(201);
+  assert.match(r.body.message, /contact you shortly/);
+  const stored = await models.Lead.findOne({
+    type: "chatbot",
+    phone: "+447700900123",
+  });
+  assert.ok(stored);
+  assert.equal(stored.address, "10 Downing Street, London");
+  assert.equal(stored.email, undefined);
+  assert.equal(stored.brand, undefined);
+  assert.equal(stored.status, "pending");
+  await request(app).get("/api/admin/chatbot").expect(401);
+  await models.Lead.deleteOne({ _id: stored._id });
 });
 test("admin login uses an HttpOnly SameSite cookie; sessions can be revoked", async () => {
   await agent
