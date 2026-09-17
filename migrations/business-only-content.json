@@ -1,0 +1,82 @@
+[
+  {
+    "kind": "services",
+    "slug": "printer-repair",
+    "fields": {
+      "title": {
+        "before": "Printer repair",
+        "after": "Business printer repair"
+      },
+      "description": {
+        "before": "From paper jams to complex faults. Expert diagnostics that get you back to printing.",
+        "after": "On-site diagnosis and repairs for business printers, helping reduce office downtime."
+      }
+    }
+  },
+  {
+    "kind": "services",
+    "slug": "cartridge-refilling",
+    "fields": {
+      "title": {
+        "before": "Cartridge refilling",
+        "after": "Business cartridge refilling"
+      },
+      "description": {
+        "before": "More pages, less waste. Affordable ink cartridge refills for your everyday printing.",
+        "after": "Compatible cartridge refilling for business printers, subject to model suitability."
+      }
+    }
+  },
+  {
+    "kind": "services",
+    "slug": "toner-refilling",
+    "fields": {
+      "title": {
+        "before": "Toner refilling",
+        "after": "Office toner refilling"
+      }
+    }
+  },
+  {
+    "kind": "services",
+    "slug": "scanner-repair",
+    "fields": {
+      "title": {
+        "before": "Scanner repair",
+        "after": "Office scanner repair"
+      },
+      "description": {
+        "before": "Clear scans. Seamless workflows. Troubleshooting and repairs for your scanner.",
+        "after": "Scanner diagnosis and repairs for business document workflows."
+      }
+    }
+  },
+  {
+    "kind": "posts",
+    "slug": "why-printer-shows-offline",
+    "fields": {
+      "description": {
+        "before": "Reconnect your printer and get your home office back on track.",
+        "after": "Reconnect your printer and get your office back on track."
+      },
+      "content": {
+        "before": "Check the network\nMake sure your printer and computer are connected to the same WiFi network. A guest network may isolate devices.\n\nRestart and reconnect\nSave your work, restart the printer and check its network status. Consult the device manual before resetting any network settings.\n\nSelect the right printer\nRemove stuck print jobs and choose the correct printer in your system settings. Multiple saved copies of the same printer can cause confusion.\n\nStill offline?\nPinterok can help with connectivity and setup for homes and offices. Tell us your printer model and what you have tried.",
+        "after": "Check the network\nMake sure your printer and computer are connected to the same WiFi network. A guest network may isolate devices.\n\nRestart and reconnect\nSave your work, restart the printer and check its network status. Consult the device manual before resetting any network settings.\n\nSelect the right printer\nRemove stuck print jobs and choose the correct printer in your system settings. Multiple saved copies of the same printer can cause confusion.\n\nStill offline?\nPinterok can help with connectivity and setup for businesses and organisations. Tell us your printer model and what you have tried."
+      }
+    }
+  },
+  {
+    "kind": "faqs",
+    "slug": "faq-2",
+    "fields": {
+      "title": {
+        "before": "Do you provide home service?",
+        "after": "Who can book a printer repair?"
+      },
+      "content": {
+        "before": "Yes. We arrange doorstep printer diagnostics and repairs for homes and offices. Contact us with your postcode to confirm coverage.",
+        "after": "Services are provided exclusively to business and organisational customers. We do not accept residential repair bookings. Contact us with your business postcode to check availability."
+      }
+    }
+  }
+]
